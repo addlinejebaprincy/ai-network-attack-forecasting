@@ -1,6 +1,6 @@
 # NetPredict: AI-Based Network Attack Forecasting
 
-> **An academic and hackathon cybersecurity prototype for forecasting short-term attack risk from historical CICIDS2017 network-flow behavior.**
+> **A cybersecurity prototype for forecasting short-term attack risk from historical CICIDS2017 network-flow behavior.**
 
 [![Status: Research Prototype](https://img.shields.io/badge/status-research%20prototype-0f766e)](#project-status)
 [![Dataset: CICIDS2017](https://img.shields.io/badge/dataset-CICIDS2017-2563eb)](#dataset--cicids2017)
