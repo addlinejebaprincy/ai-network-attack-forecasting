@@ -191,9 +191,6 @@ def preprocess_traffic(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[
 
     # Handle Inf, -Inf, and NaN values
     X_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # Fill NaN with column median (derived cleanly without leakage when splitting)
-    X_df.fillna(X_df.median(), inplace=True)
-
     # Also drop any residual column with constant zero variance
     var = X_df.var()
     non_zero_cols = var[var > 1e-6].index.tolist()
@@ -216,6 +213,11 @@ def chronological_split(
     X_test = X_df.iloc[split_idx:].copy()
     y_train = y.iloc[:split_idx].copy()
     y_test = y.iloc[split_idx:].copy()
+
+    # Fit imputation values on the training partition only.
+    train_medians = X_train.median()
+    X_train = X_train.fillna(train_medians)
+    X_test = X_test.fillna(train_medians)
 
     print(f"[*] Chronological split: Train = {len(X_train)} samples, Test = {len(X_test)} samples")
     print(f"[*] Train attack ratio: {y_train.mean():.4f} | Test attack ratio: {y_test.mean():.4f}")

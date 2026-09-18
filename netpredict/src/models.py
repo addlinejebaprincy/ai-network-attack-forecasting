@@ -17,6 +17,7 @@ from sklearn.metrics import (
     roc_auc_score,
     confusion_matrix,
 )
+from sklearn.utils.class_weight import compute_class_weight
 import joblib
 
 # Suppress TensorFlow verbose logging for clean hackathon console
@@ -96,6 +97,14 @@ def train_lstm_model(
     Trains the LSTM temporal model using EarlyStopping to avoid laptop CPU overload.
     """
     print(f"[*] Training Temporal LSTM on CPU ({epochs} epochs max, batch_size={batch_size})...")
+    classes = np.unique(y_train)
+    class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=classes,
+        y=y_train,
+    )
+    class_weight = dict(zip(classes.tolist(), class_weights.tolist()))
+
     early_stop = EarlyStopping(
         monitor="val_loss",
         patience=3,
@@ -110,6 +119,8 @@ def train_lstm_model(
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[early_stop],
+        class_weight=class_weight,
+        shuffle=False,
         verbose=1,
     )
     print("[✓] LSTM temporal model trained successfully.")

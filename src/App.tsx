@@ -20,16 +20,72 @@ import {
   Sliders,
   Info,
 } from "lucide-react";
-import { SAMPLE_WINDOWS, MODEL_METRICS, TrafficWindow } from "./sampleData";
 import { PROJECT_FILES, ProjectFile } from "./codeFiles";
 
+const API_BASE_URL = "http://127.0.0.1:8000";
+
+interface ReplayResponse {
+  y_true: number[];
+  lr_probs: number[];
+  lstm_probs: number[];
+  features?: number[][];
+}
+
+interface ModelMetrics {
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  roc_auc: number;
+  confusion_matrix: number[][];
+}
+
+interface MetricsResponse {
+  "Logistic Regression (Baseline)": ModelMetrics;
+  "LSTM Temporal Model": ModelMetrics;
+}
+
+interface ShapContribution {
+  Feature: string;
+  Contribution: string;
+  Direction: string;
+  SHAP_Value: number;
+  Value: number;
+}
+
+interface ShapResponse {
+  explanations: ShapContribution[];
+  methodology_note: string;
+}
+
+interface PredictionResponse {
+  probability: number;
+  predicted_label: string;
+  risk_level: string;
+}
+
+interface ReplayWindow {
+  index: number;
+  yTrue: number;
+  lstmRisk: number;
+  lrRisk: number;
+  features?: number[];
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "files" | "pitch">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard">("dashboard");
 
   // Replay State
-  const [currentIndex, setCurrentIndex] = useState<number>(18);
+  const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [replaySpeedMs, setReplaySpeedMs] = useState<number>(800);
+  const [replayData, setReplayData] = useState<ReplayResponse | null>(null);
+  const [modelMetrics, setModelMetrics] = useState<MetricsResponse | null>(null);
+  const [shapData, setShapData] = useState<ShapResponse | null>(null);
+  const [predictionData, setPredictionData] = useState<PredictionResponse | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+  const [shapError, setShapError] = useState<string | null>(null);
 
   // Model selection
   const [selectedModel, setSelectedModel] = useState<"lstm" | "lr">("lstm");
@@ -43,9 +99,55 @@ export default function App() {
   const [selectedFile, setSelectedFile] = useState<ProjectFile>(PROJECT_FILES[0]);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
 
-  // Active traffic window
-  const activeWindow: TrafficWindow = SAMPLE_WINDOWS[currentIndex] || SAMPLE_WINDOWS[0];
-  const activeProb = selectedModel === "lstm" ? activeWindow.lstmRisk : activeWindow.lrRisk;
+  useEffect(() => {
+    const loadDashboardData = async () => {
+      try {
+        const [metricsResponse, replayResponse] = await Promise.all([
+          fetch(`${API_BASE_URL}/metrics`),
+          fetch(`${API_BASE_URL}/replay`),
+        ]);
+        if (!metricsResponse.ok || !replayResponse.ok) {
+          throw new Error("The API returned an error while loading dashboard data.");
+        }
+        const [metrics, replay] = await Promise.all([
+          metricsResponse.json() as Promise<MetricsResponse>,
+          replayResponse.json() as Promise<ReplayResponse>,
+        ]);
+        if (!replay.y_true?.length || replay.y_true.length !== replay.lr_probs.length || replay.y_true.length !== replay.lstm_probs.length) {
+          throw new Error("The replay response contains inconsistent historical data.");
+        }
+        setModelMetrics(metrics);
+        setReplayData(replay);
+      } catch (error) {
+        setApiError(error instanceof Error ? error.message : "Unable to connect to the NetPredict API.");
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    void loadDashboardData();
+  }, []);
+
+  const replayWindows: ReplayWindow[] = useMemo(() => {
+    if (!replayData) return [];
+    return replayData.y_true.map((yTrue, index) => ({
+      index,
+      yTrue,
+      lstmRisk: replayData.lstm_probs[index],
+      lrRisk: replayData.lr_probs[index],
+      features: replayData.features?.[index],
+    }));
+  }, [replayData]);
+
+  const activeWindow: ReplayWindow = replayWindows[currentIndex] || {
+    index: 0,
+    yTrue: 0,
+    lstmRisk: 0,
+    lrRisk: 0,
+  };
+  const activeProb = selectedModel === "lstm"
+    ? activeWindow.lstmRisk
+    : predictionData?.probability ?? activeWindow.lrRisk;
   const activeRiskPct = Math.round(activeProb * 1000) / 10;
 
   // Determine Risk Tier
@@ -89,18 +191,56 @@ export default function App() {
     }
   }, [activeRiskPct, lowThreshold, medThreshold, highThreshold]);
 
+  useEffect(() => {
+    if (!activeWindow.features) {
+      setShapData(null);
+      setPredictionData(null);
+      setShapError("SHAP requires a trained feature vector, which is not included in the replay response.");
+      return;
+    }
+
+    const params = new URLSearchParams();
+    activeWindow.features.forEach((value) => params.append("features", String(value)));
+    setShapError(null);
+    Promise.all([
+      fetch(`${API_BASE_URL}/shap?${params.toString()}`),
+      fetch(`${API_BASE_URL}/predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ features: activeWindow.features }),
+      }),
+    ])
+      .then(async ([shapResponse, predictionResponse]) => {
+        if (!shapResponse.ok) throw new Error("The SHAP API returned an error.");
+        if (!predictionResponse.ok) throw new Error("The prediction API returned an error.");
+        return Promise.all([
+          shapResponse.json() as Promise<ShapResponse>,
+          predictionResponse.json() as Promise<PredictionResponse>,
+        ]);
+      })
+      .then(([shap, prediction]) => {
+        setShapData(shap);
+        setPredictionData(prediction);
+      })
+      .catch((error: unknown) => {
+        setShapData(null);
+        setPredictionData(null);
+        setShapError(error instanceof Error ? error.message : "Unable to load SHAP contributions.");
+      });
+  }, [activeWindow.features]);
+
   // Replay animation effect
   useEffect(() => {
     let interval: any = null;
     if (isPlaying) {
       interval = setInterval(() => {
-        setCurrentIndex((prev) => (prev + 1) % SAMPLE_WINDOWS.length);
+        setCurrentIndex((prev) => (prev + 1) % Math.max(replayWindows.length, 1));
       }, replaySpeedMs);
     }
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [isPlaying, replaySpeedMs]);
+  }, [isPlaying, replaySpeedMs, replayWindows.length]);
 
   // Copy handler
   const handleCopyCode = (text: string, path: string) => {
@@ -108,6 +248,22 @@ export default function App() {
     setCopiedPath(path);
     setTimeout(() => setCopiedPath(null), 2000);
   };
+
+  if (isLoading) {
+    return <div className="min-h-screen bg-slate-950 text-slate-300 flex items-center justify-center">Loading dashboard data...</div>;
+  }
+
+  if (apiError || !modelMetrics || !replayData || replayWindows.length === 0) {
+    return <div className="min-h-screen bg-slate-950 text-slate-300 flex items-center justify-center p-6 text-center">{apiError || "The API returned no historical replay data."}</div>;
+  }
+
+  const lrMetrics = modelMetrics["Logistic Regression (Baseline)"];
+  const lstmMetrics = modelMetrics["LSTM Temporal Model"];
+  const chartDenominator = Math.max(replayWindows.length - 1, 1);
+  const formatPercent = (value: number) => `${(value * 100).toFixed(2)}%`;
+  const metricDelta = (key: keyof Pick<ModelMetrics, "accuracy" | "precision" | "recall" | "f1">) =>
+    `${((lstmMetrics[key] - lrMetrics[key]) * 100).toFixed(2)}%`;
+  const aucDelta = (lstmMetrics.roc_auc - lrMetrics.roc_auc).toFixed(4);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500/30">
@@ -142,28 +298,6 @@ export default function App() {
               <Activity className="w-3.5 h-3.5" />
               <span>Forecast Dashboard</span>
             </button>
-            <button
-              onClick={() => setActiveTab("files")}
-              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition flex items-center space-x-1.5 ${
-                activeTab === "files"
-                  ? "bg-cyan-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <FileCode className="w-3.5 h-3.5" />
-              <span>Python Codebase</span>
-            </button>
-            <button
-              onClick={() => setActiveTab("pitch")}
-              className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition flex items-center space-x-1.5 ${
-                activeTab === "pitch"
-                  ? "bg-cyan-600 text-white shadow-sm"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              <HelpCircle className="w-3.5 h-3.5" />
-              <span>Hackathon Pitch & Q&A</span>
-            </button>
           </div>
         </div>
       </header>
@@ -182,7 +316,7 @@ export default function App() {
                   </span>
                 </div>
                 <span className="text-slate-400 hidden sm:inline">
-                  Tuesday-WorkingHours.pcap_ISCX (Window #{currentIndex} of {SAMPLE_WINDOWS.length - 1})
+                  Tuesday-WorkingHours.pcap_ISCX (Window #{currentIndex} of {replayWindows.length - 1})
                 </span>
               </div>
               <div className="bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-[11px] text-slate-400 flex items-center gap-2">
@@ -211,7 +345,7 @@ export default function App() {
                 <button
                   onClick={() => {
                     setIsPlaying(false);
-                    setCurrentIndex((prev) => (prev + 1) % SAMPLE_WINDOWS.length);
+                    setCurrentIndex((prev) => (prev + 1) % replayWindows.length);
                   }}
                   className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium flex items-center space-x-1"
                 >
@@ -236,7 +370,7 @@ export default function App() {
                 <input
                   type="range"
                   min="0"
-                  max={SAMPLE_WINDOWS.length - 1}
+                  max={replayWindows.length - 1}
                   value={currentIndex}
                   onChange={(e) => {
                     setIsPlaying(false);
@@ -286,7 +420,7 @@ export default function App() {
                 </div>
                 <div className="mt-2 text-xs text-slate-400 flex items-center justify-between">
                   <span>Model: {selectedModel === "lstm" ? "LSTM (5-step temporal)" : "Logistic Regression"}</span>
-                  <span className="font-mono text-slate-500">{activeWindow.timeLabel}</span>
+                  <span className="font-mono text-slate-500">Historical window #{currentIndex}</span>
                 </div>
                 <div className="w-full bg-slate-800 h-1.5 rounded-full mt-3 overflow-hidden">
                   <div
@@ -424,8 +558,8 @@ export default function App() {
                     stroke="#64748b"
                     strokeWidth="1.5"
                     strokeDasharray="4 3"
-                    points={SAMPLE_WINDOWS.map((w, idx) => {
-                      const x = (idx / (SAMPLE_WINDOWS.length - 1)) * 800;
+                    points={replayWindows.map((w, idx) => {
+                      const x = (idx / chartDenominator) * 800;
                       const y = 200 - w.lrRisk * 180 - 10;
                       return `${x},${y}`;
                     }).join(" ")}
@@ -434,8 +568,8 @@ export default function App() {
                   {/* LSTM Area & Line */}
                   <polygon
                     fill="url(#lstmGrad)"
-                    points={`0,200 ${SAMPLE_WINDOWS.map((w, idx) => {
-                      const x = (idx / (SAMPLE_WINDOWS.length - 1)) * 800;
+                    points={`0,200 ${replayWindows.map((w, idx) => {
+                      const x = (idx / chartDenominator) * 800;
                       const y = 200 - w.lstmRisk * 180 - 10;
                       return `${x},${y}`;
                     }).join(" ")} 800,200`}
@@ -444,8 +578,8 @@ export default function App() {
                     fill="none"
                     stroke="#38bdf8"
                     strokeWidth="2.5"
-                    points={SAMPLE_WINDOWS.map((w, idx) => {
-                      const x = (idx / (SAMPLE_WINDOWS.length - 1)) * 800;
+                    points={replayWindows.map((w, idx) => {
+                      const x = (idx / chartDenominator) * 800;
                       const y = 200 - w.lstmRisk * 180 - 10;
                       return `${x},${y}`;
                     }).join(" ")}
@@ -453,7 +587,7 @@ export default function App() {
 
                   {/* Current index needle */}
                   {(() => {
-                    const curX = (currentIndex / (SAMPLE_WINDOWS.length - 1)) * 800;
+                    const curX = (currentIndex / chartDenominator) * 800;
                     const curY = 200 - activeProb * 180 - 10;
                     return (
                       <g>
@@ -554,16 +688,16 @@ export default function App() {
 
                 {/* Feature contribution bars */}
                 <div className="space-y-2.5">
-                  {activeWindow.features.map((feat, idx) => {
-                    const isPositive = feat.shap > 0;
-                    const barWidth = Math.min(100, Math.abs(feat.shap) * 1200);
+                  {shapData?.explanations.map((feat, idx) => {
+                    const isPositive = feat.SHAP_Value > 0;
+                    const barWidth = Math.min(100, Math.abs(feat.SHAP_Value) * 1200);
                     return (
                       <div key={idx} className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80">
                         <div className="flex justify-between items-center text-xs mb-1">
-                          <span className="font-semibold text-slate-200">{feat.name}</span>
+                          <span className="font-semibold text-slate-200">{feat.Feature}</span>
                           <div className="flex items-center space-x-2">
                             <span className="font-mono text-slate-400">
-                              {feat.value} {feat.unit}
+                              {feat.Value}
                             </span>
                             <span
                               className={`font-mono text-[11px] font-bold px-1.5 py-0.5 rounded ${
@@ -573,7 +707,7 @@ export default function App() {
                               }`}
                             >
                               {isPositive ? "+" : ""}
-                              {feat.shap.toFixed(3)}
+                              {feat.SHAP_Value.toFixed(3)}
                             </span>
                           </div>
                         </div>
@@ -596,11 +730,7 @@ export default function App() {
                           <span>{isPositive ? "▲ Pushes toward attack risk" : "▼ Pulls toward benign baseline"}</span>
                           <span>
                             Contribution:{" "}
-                            {Math.abs(feat.shap) > 0.05
-                              ? "High"
-                              : Math.abs(feat.shap) > 0.02
-                              ? "Medium"
-                              : "Low"}
+                            {feat.Contribution}
                           </span>
                         </div>
                       </div>
@@ -609,8 +739,7 @@ export default function App() {
                 </div>
 
                 <div className="text-[11px] text-slate-400 bg-slate-950/40 p-2.5 rounded border border-slate-800/60 leading-relaxed">
-                  <strong className="text-slate-300">Methodology Note:</strong> Computes real local SHAP values against
-                  a 50-sample benign reference background distribution. Positive values indicate features driving elevated risk; negative values represent mitigating baseline indicators.
+                  <strong className="text-slate-300">Methodology Note:</strong> {shapData?.methodology_note || shapError || "SHAP data is unavailable for this replay response."}
                 </div>
               </div>
 
@@ -622,7 +751,7 @@ export default function App() {
                     <span>Possible MITRE ATT&CK Investigation Context</span>
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Contextual mapping from flow attributes to adversary techniques — <em>not definitive attribution</em>
+                    Contextual, rule-based mapping from flow attributes to possible techniques — <em>not definitive attribution</em>
                   </p>
                 </div>
 
@@ -640,8 +769,8 @@ export default function App() {
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">Tactic: Credential Access (TA0006)</div>
                       <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                        Repeated bidirectional flow sequences with short duration and high packet counts directly resemble
-                        the SSH-Patator and FTP-Patator credential access patterns present in CICIDS2017 Tuesday captures.
+                        A prototype context rule maps repeated bidirectional flow sequences with short duration and high packet counts
+                        to the SSH-Patator and FTP-Patator patterns present in CICIDS2017 Tuesday captures.
                       </p>
                       <div className="mt-2 text-[11px] font-semibold text-slate-400">Actionable Triage:</div>
                       <ul className="list-disc list-inside text-xs text-slate-400 mt-1 space-y-0.5">
@@ -662,8 +791,7 @@ export default function App() {
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">Tactic: Discovery (TA0007)</div>
                       <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                        Spikes in SYN flag density ({activeWindow.synFlags} flags) and high Flow Packets/s ({activeWindow.flowPacketsSec} p/s)
-                        indicate automated port scanning preceding authentication attacks.
+                        A prototype context rule associates elevated flow behavior with a possible network service discovery pattern.
                       </p>
                     </div>
                   </div>
@@ -674,8 +802,8 @@ export default function App() {
                     </div>
                     <div className="text-[11px] text-slate-400 mt-0.5">Tactic: Discovery (TA0007)</div>
                     <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                      Observed minor upward variance in SYN flags and packet frequency. While within moderate boundaries,
-                      this behavior often acts as early reconnaissance preceding focused brute-force sweeps.
+                      A prototype context rule maps minor upward variance in SYN flags and packet frequency to a possible
+                      network service discovery pattern; it does not establish reconnaissance or attacker behavior.
                     </p>
                   </div>
                 ) : (
@@ -685,8 +813,7 @@ export default function App() {
                     </div>
                     <div className="text-[11px] text-slate-400 mt-0.5">Tactic: Standard Network Operations</div>
                     <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                      Current traffic statistics (Flow bytes/s: {activeWindow.flowBytesSec}, SYN: {activeWindow.synFlags})
-                      exhibit normal Gaussian distribution. No adversary techniques matched.
+                      Current historical replay window remains below the configured risk threshold. No prototype context rule matched.
                     </p>
                   </div>
                 )}
@@ -718,44 +845,44 @@ export default function App() {
                       <th className="py-2.5 px-4">Logistic Regression (Baseline)</th>
                       <th className="py-2.5 px-4">LSTM Temporal Model (Lookback=5)</th>
                       <th className="py-2.5 px-4">Performance Delta</th>
-                      <th className="py-2.5 px-4">Why Temporal Wins</th>
+                      <th className="py-2.5 px-4">Model Interpretation</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 font-mono">
                     <tr>
                       <td className="py-2.5 px-4 font-sans text-slate-300 font-medium">Accuracy</td>
-                      <td className="py-2.5 px-4 text-slate-400">{(MODEL_METRICS.lr.accuracy * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{(MODEL_METRICS.lstm.accuracy * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-emerald-400 font-bold">+6.86%</td>
+                      <td className="py-2.5 px-4 text-slate-400">{formatPercent(lrMetrics.accuracy)}</td>
+                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{formatPercent(lstmMetrics.accuracy)}</td>
+                      <td className="py-2.5 px-4 text-emerald-400 font-bold">{metricDelta("accuracy")}</td>
                       <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Reduces false alarms on transient spikes</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-4 font-sans text-slate-300 font-medium">Precision</td>
-                      <td className="py-2.5 px-4 text-slate-400">{(MODEL_METRICS.lr.precision * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{(MODEL_METRICS.lstm.precision * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-emerald-400 font-bold">+11.97%</td>
+                      <td className="py-2.5 px-4 text-slate-400">{formatPercent(lrMetrics.precision)}</td>
+                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{formatPercent(lstmMetrics.precision)}</td>
+                      <td className="py-2.5 px-4 text-emerald-400 font-bold">{metricDelta("precision")}</td>
                       <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Validates sustained malicious intent</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-4 font-sans text-slate-300 font-medium">Recall</td>
-                      <td className="py-2.5 px-4 text-slate-400">{(MODEL_METRICS.lr.recall * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{(MODEL_METRICS.lstm.recall * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-emerald-400 font-bold">+13.51%</td>
+                      <td className="py-2.5 px-4 text-slate-400">{formatPercent(lrMetrics.recall)}</td>
+                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{formatPercent(lstmMetrics.recall)}</td>
+                      <td className="py-2.5 px-4 text-emerald-400 font-bold">{metricDelta("recall")}</td>
                       <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Catches stealthy multi-step buildups</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-4 font-sans text-slate-300 font-medium">F1 Score</td>
-                      <td className="py-2.5 px-4 text-slate-400">{(MODEL_METRICS.lr.f1 * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{(MODEL_METRICS.lstm.f1 * 100).toFixed(2)}%</td>
-                      <td className="py-2.5 px-4 text-emerald-400 font-bold">+12.76%</td>
+                      <td className="py-2.5 px-4 text-slate-400">{formatPercent(lrMetrics.f1)}</td>
+                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{formatPercent(lstmMetrics.f1)}</td>
+                      <td className="py-2.5 px-4 text-emerald-400 font-bold">{metricDelta("f1")}</td>
                       <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Harmonic balance under class imbalance</td>
                     </tr>
                     <tr>
                       <td className="py-2.5 px-4 font-sans text-slate-300 font-medium">ROC-AUC</td>
-                      <td className="py-2.5 px-4 text-slate-400">{(MODEL_METRICS.lr.roc_auc).toFixed(4)}</td>
-                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{(MODEL_METRICS.lstm.roc_auc).toFixed(4)}</td>
-                      <td className="py-2.5 px-4 text-emerald-400 font-bold">+0.0872</td>
-                      <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Superior discrimination threshold range</td>
+                      <td className="py-2.5 px-4 text-slate-400">{lrMetrics.roc_auc.toFixed(4)}</td>
+                      <td className="py-2.5 px-4 text-cyan-300 font-bold">{lstmMetrics.roc_auc.toFixed(4)}</td>
+                      <td className="py-2.5 px-4 text-emerald-400 font-bold">{aucDelta}</td>
+                      <td className="py-2.5 px-4 font-sans text-slate-400 text-[11px]">Discrimination across the threshold range</td>
                     </tr>
                   </tbody>
                 </table>
@@ -765,15 +892,15 @@ export default function App() {
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs">
                   <span className="font-semibold text-slate-300 block mb-1">Baseline Logistic Regression Confusion Matrix</span>
                   <div className="font-mono text-slate-400 flex justify-between bg-slate-900/60 p-2 rounded">
-                    <span>TN: 1420 | FP: 112</span>
-                    <span>FN: 104 | TP: 398</span>
+                    <span>TN: {lrMetrics.confusion_matrix[0][0]} | FP: {lrMetrics.confusion_matrix[0][1]}</span>
+                    <span>FN: {lrMetrics.confusion_matrix[1][0]} | TP: {lrMetrics.confusion_matrix[1][1]}</span>
                   </div>
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-xs">
                   <span className="font-semibold text-cyan-300 block mb-1">Temporal LSTM Confusion Matrix</span>
                   <div className="font-mono text-slate-400 flex justify-between bg-cyan-950/30 p-2 rounded border border-cyan-900/40">
-                    <span>TN: 1498 | FP: 34</span>
-                    <span>FN: 36 | TP: 466</span>
+                    <span>TN: {lstmMetrics.confusion_matrix[0][0]} | FP: {lstmMetrics.confusion_matrix[0][1]}</span>
+                    <span>FN: {lstmMetrics.confusion_matrix[1][0]} | TP: {lstmMetrics.confusion_matrix[1][1]}</span>
                   </div>
                 </div>
               </div>
@@ -911,11 +1038,11 @@ export default function App() {
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
                   <span className="font-bold text-cyan-400 block mb-1">[0:25 - 0:50] Temporal ML Architecture:</span>
-                  "We benchmarked on CICIDS2017 Tuesday captures. We stripped IP and port identifiers to prevent trivial memorization and split chronologically without shuffling. Our small 5-step LSTM model achieves a 93.5% F1 score, outperforming our Logistic Regression baseline by over 12% because attack precursors accumulate across time."
+                  "We benchmarked on CICIDS2017 Tuesday captures. We stripped IP and port identifiers to prevent trivial memorization and split chronologically without shuffling. The comparison table above reports the stored evaluation results for the small 5-step LSTM model and Logistic Regression baseline."
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
                   <span className="font-bold text-cyan-400 block mb-1">[0:50 - 1:20] Live Replay & Risk Alerting:</span>
-                  "When we run our historical replay, you see the risk score rise from 8% normal baseline to 82% CRITICAL priority as early Patator brute-force reconnaissance begins. This gives SOC operators precious minutes to react."
+                  "When we run our historical replay, the risk score follows the stored chronological prediction sequence as Patator brute-force reconnaissance begins. This gives SOC operators historical context for triage."
                 </div>
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
                   <span className="font-bold text-cyan-400 block mb-1">[1:20 - 2:00] Explainability & MITRE ATT&CK:</span>

@@ -80,6 +80,14 @@ def main():
         X_test_scaled, y_test_s.values, SEQUENCE_LENGTH, FORECAST_HORIZON
     )
 
+    # Keep the test windows for final evaluation only. Use the latest training
+    # windows as a chronological validation partition for LSTM early stopping.
+    validation_start = int(len(X_train_seq) * 0.9)
+    X_lstm_train = X_train_seq[:validation_start]
+    y_lstm_train = y_train_seq[:validation_start]
+    X_lstm_val = X_train_seq[validation_start:]
+    y_lstm_val = y_train_seq[validation_start:]
+
     print(f"[*] LSTM Train Windows: {X_train_seq.shape} | Baseline Train: {X_train_base.shape}")
     print(f"[*] LSTM Test Windows:  {X_test_seq.shape} | Baseline Test:  {X_test_base.shape}")
 
@@ -97,10 +105,10 @@ def main():
     # Train LSTM on CPU
     lstm_model, history = train_lstm_model(
         lstm_model,
-        X_train_seq,
-        y_train_seq,
-        X_test_seq,
-        y_test_seq,
+        X_lstm_train,
+        y_lstm_train,
+        X_lstm_val,
+        y_lstm_val,
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
     )
