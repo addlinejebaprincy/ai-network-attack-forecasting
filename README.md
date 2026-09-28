@@ -759,6 +759,89 @@ Possible research and engineering extensions include:
 - Improve the frontend’s use of API-provided risk metadata while retaining explicit uncertainty and non-attribution language.
 - Add automated tests for preprocessing, API schemas, artifact loading, and frontend API error states.
 
+## Running Locally with Docker
+
+The project is containerized using Docker and Docker Compose. The Docker setup runs the React frontend, Nginx reverse proxy, and FastAPI backend as separate services.
+
+### Prerequisites
+
+Install the following before running the project:
+
+- Git
+- Docker Desktop
+
+Docker Desktop includes Docker Compose.
+
+### 1. Clone the repository
+
+```bash
+git clone <YOUR-GITHUB-REPOSITORY-URL>
+cd ai-network-attack-forecasting
+````
+
+### 2. Build and start the application
+
+Run:
+
+```bash
+docker compose up --build
+```
+
+This command builds the frontend and backend Docker images and starts the application.
+
+The project consists of the following services:
+
+* **Frontend:** React + TypeScript application
+* **Nginx:** Serves the frontend and acts as a reverse proxy for the backend API
+* **Backend:** FastAPI application
+* **ML components:** Model artifacts and supporting application data
+
+### 3. Open the dashboard
+
+Once the containers are running, open the following address in your browser:
+
+```text
+http://localhost:3000
+```
+
+The Network Attack Forecasting dashboard should be available there.
+
+### 4. Check the backend health
+
+The FastAPI backend is accessed through the Nginx reverse proxy using the `/api` path.
+
+To verify that the backend is running, open:
+
+```text
+http://localhost:3000/api/health
+```
+
+A successful response indicates that the backend is running correctly.
+
+### 5. Stop the application
+
+To stop the running containers, press:
+
+```text
+Ctrl + C
+```
+
+in the terminal running Docker Compose.
+
+Alternatively, you can stop and remove the containers with:
+
+```bash
+docker compose down
+```
+
+### Notes
+
+Large raw datasets are intentionally not included in the GitHub repository. They are excluded through `.gitignore` because of their file size.
+
+If a dataset is required to reproduce the training pipeline, obtain the required dataset separately and place it in the expected data directory.
+
+The Docker configuration is intended for local development, demonstration, and evaluation. It is not a production deployment configuration.
+
 ## Project Status
 
 **Status: Functional academic/hackathon prototype.**

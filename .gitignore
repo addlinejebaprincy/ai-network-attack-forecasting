@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Python
+netpredict/.venv/
+__pycache__/
+*.pyc
+
+# Raw datasets
+netpredict/data/raw/*.csv

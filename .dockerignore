@@ -1,0 +1,53 @@
+# Node / Frontend
+node_modules/
+build/
+dist/
+coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env*
+!.env.example
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Raw / large datasets
+data/raw/
+datasets/raw/
+*.csv
+*.parquet
+*.jsonl
+
+# ML / generated artifacts
+models/
+checkpoints/
+artifacts/
+
+# Temporary files
+*.tmp
+*.temp
